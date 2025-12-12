@@ -134,6 +134,7 @@ rm ~/.local/bin/yt-x
   - [chafa](https://github.com/hpjansson/chafa) - Cross-terminal image rendering (recommended).
   - [icat](https://sw.kovidgoyal.net/kitty/kittens/icat/) - recommended for kitty terminal and ghostty
   - [imgcat](https://github.com/danielgatis/imgcat)
+  - [ueberzugpp](https://github.com/seebye/ueberzugpp) - Advanced image overlay renderer (experimental support for fzf preview).
 - **terminal with image rendering support:**
   - [kitty](https://sw.kovidgoyal.net/kitty/) - currently has the best image rendering capabilities (recommended)
   - [wezterm](https://wezfurlong.org/wezterm/index.html)
@@ -240,6 +241,17 @@ For additional enhancements, consider:
 
 - [uosc](https://github.com/tomasklaen/uosc) for a modern `mpv` UI.
 - [thumbfast](https://github.com/po5/thumbfast) for thumbnail timeline previews.
+
+### Ueberzugpp Image Preview Setup
+
+To enable `ueberzugpp` for image previews in `fzf`:
+
+1.  **Install `ueberzugpp`:** Ensure `ueberzugpp` is installed and available in your system's PATH.
+2.  **Set `IMAGE_RENDERER`:** Edit your `yt-x.conf` (usually `~/.config/yt-x/yt-x.conf`) and set:
+    ```ini
+    IMAGE_RENDERER: ueberzugpp
+    ```
+    This will provide a more integrated and cleaner image overlay experience.
 
 ## Custom Playlists
 

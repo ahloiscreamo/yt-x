@@ -31,6 +31,60 @@ CLI_PREVIEW_SCRIPTS_DIR="$CLI_CACHE_DIR/preview_text"
 [ -d "$CLI_AUTO_GEN_PLAYLISTS" ] || mkdir -p "$CLI_AUTO_GEN_PLAYLISTS"
 CLI_SUPPORT_PROJECT_URL="https://buymeacoffee.com/benexl"
 
+# --- Ueberzugpp Config ---
+# Use a PID file and derive socket path for robust communication
+export UEBERZUG_PID_FILE="$CLI_CACHE_DIR/ueberzug.pid"
+export UEBERZUG_SOCKET="" # Will be set dynamically
+
+function start_ueberzug_yt_x {
+    # Ensure previous instances are cleaned up if any
+    cleanup_ueberzug_yt_x >/dev/null 2>&1
+
+    ueberzugpp layer --no-stdin --silent --pid-file "$UEBERZUG_PID_FILE" &
+    local UB_PID=$! # Get PID of ueberzugpp process
+
+    # Wait for the PID file to be created by ueberzugpp
+    local timeout=5
+    while [ ! -s "$UEBERZUG_PID_FILE" ] && [ "$timeout" -gt 0 ]; do
+        sleep 0.1
+        timeout=$((timeout - 1))
+    done
+
+    if [ -s "$UEBERZUG_PID_FILE" ]; then
+        local pid_from_file=$(cat "$UEBERZUG_PID_FILE")
+        export UEBERZUG_SOCKET="/tmp/ueberzugpp-$pid_from_file.socket"
+        # Test if socket exists
+        if [ ! -S "$UEBERZUG_SOCKET" ]; then
+             # It's possible the socket path is different, try to get it from ueberzugpp directly
+             local temp_socket=$(ueberzugpp list-sockets 2>/dev/null | grep "$pid_from_file" | awk '{print $NF}')
+             if [ -n "$temp_socket" ]; then
+                 export UEBERZUG_SOCKET="$temp_socket"
+             else
+                 send_notification "Ueberzugpp socket not found for PID $pid_from_file. Ueberzugpp might not be working correctly."
+                 return 1
+             fi
+        fi
+        #echo "Ueberzugpp started with socket: $UEBERZUG_SOCKET" >&2
+    else
+        send_notification "Failed to start ueberzugpp or create PID file."
+        return 1
+    fi
+}
+
+function cleanup_ueberzug_yt_x {
+    if [ -n "$UEBERZUG_SOCKET" ] && [ -S "$UEBERZUG_SOCKET" ]; then
+        ueberzugpp cmd -s "$UEBERZUG_SOCKET" -a exit >/dev/null 2>&1
+    fi
+    if [ -s "$UEBERZUG_PID_FILE" ]; then
+        local pid_to_kill=$(cat "$UEBERZUG_PID_FILE")
+        if kill -0 "$pid_to_kill" 2>/dev/null; then # Check if process is still running
+            kill "$pid_to_kill" >/dev/null 2>&1
+        fi
+        rm -f "$UEBERZUG_PID_FILE"
+    fi
+    export UEBERZUG_SOCKET=""
+}
+
 case "$(uname -a)" in
 *ndroid) PLATFORM="android" ;;
 *Darwin*) PLATFORM="mac" ;;
@@ -71,7 +125,7 @@ VIDEO_QUALITY: $VIDEO_QUALITY
 # its cool so enable it
 ENABLE_PREVIEW: $ENABLE_PREVIEW
 
-# what to use for rendering images in the terminal [chafa/icat]
+# what to use for rendering images in the terminal [chafa/icat/ueberzugpp]
 IMAGE_RENDERER: $IMAGE_RENDERER
 
 # whether to run mpv as a background process and prevent it from closing even if you terminate the program or terminal session
@@ -194,10 +248,26 @@ load_config() {
       [ -s "$CLI_EXTENSION_DIR/$ext" ] && . "$CLI_EXTENSION_DIR/$ext"
     done
   fi
+  export FZF_DEFAULT_OPTS PRETTY_PRINT PLATFORM IMAGE_RENDERER
+
+  if [ "$IMAGE_RENDERER" = "ueberzugpp" ]; then
+      if command -v ueberzugpp >/dev/null 2>&1; then
+          if start_ueberzug_yt_x; then
+              trap cleanup_ueberzug_yt_x EXIT HUP INT QUIT PIPE TERM
+          else
+              send_notification "Failed to initialize ueberzugpp. Falling back to chafa."
+              ENABLE_PREVIEW="false"
+              IMAGE_RENDERER="chafa"
+          fi
+      else
+          send_notification "IMAGE_RENDERER set to 'ueberzugpp' but ueberzugpp not found. Falling back to chafa."
+          ENABLE_PREVIEW="false"
+          IMAGE_RENDERER="chafa" # Fallback to chafa
+      fi
+  fi
   if ! [ -s "$CLI_CONFIG_DIR/${CLI_NAME}.conf" ]; then
     print_config >"$CLI_CONFIG_DIR/${CLI_NAME}.conf"
   fi
-  export FZF_DEFAULT_OPTS PRETTY_PRINT PLATFORM IMAGE_RENDERER
 }
 send_notification() {
   echo "$1" >&2 && sleep "$NOTIFICATION_DURATION"
@@ -276,6 +346,19 @@ fzf_preview() {
       icat --clear --transfer-mode=memory --unicode-placeholder --stdin=no --place="$dim@0x0" "$file" | sed "\$d" | sed "$(printf "\$s/\$/\033[m/")"
     else
       chafa -s "$dim" "$file"
+    fi
+  elif [ "$IMAGE_RENDERER" = "ueberzugpp" ]; then
+    if [ -n "$UEBERZUG_SOCKET" ] && [ -S "$UEBERZUG_SOCKET" ]; then
+        # Clear previous image with the same identifier and add the new one
+        ueberzugpp cmd -s "$UEBERZUG_SOCKET" -i preview -a remove >/dev/null 2>&1
+        ueberzugpp cmd -s "$UEBERZUG_SOCKET" -i preview -a add \
+            -x "$FZF_PREVIEW_LEFT" -y "$FZF_PREVIEW_TOP" \
+            --max-width "$FZF_PREVIEW_COLUMNS" --max-height "$((FZF_PREVIEW_LINES - 1))" \
+            -f "$file" >/dev/null 2>&1
+    else
+        # This state should ideally not be reached if load_config handled it.
+        # But for robustness, print an error.
+        echo "Error: ueberzugpp socket not active. Preview disabled."
     fi
   elif command -v chafa >/dev/null 2>&1; then
     case "$PLATFORM" in
@@ -469,6 +552,12 @@ generate_text_preview() {
 
     printf "
 
+if [ \"\$IMAGE_RENDERER\" = \"ueberzugpp\" ]; then
+    # Reserve vertical space for the ueberzugpp image overlay
+    # This pushes the text details down below the image
+    for i in \$(seq 1 15); do echo; done
+fi
+
 if [ -f \"$CLI_PREVIEW_IMAGES_CACHE_DIR/${preview_image}.jpg\" ];then fzf_preview \"$CLI_PREVIEW_IMAGES_CACHE_DIR/${preview_image}.jpg\" 2>/dev/null;
 else echo loading preview image...;
 fi
@@ -534,7 +623,8 @@ launcher_with_preview() {
     fi
     ;;
   *)
-    fzf \
+    local selection
+    selection=$(fzf \
       --info=hidden \
       --layout=reverse \
       --height=100% \
@@ -543,7 +633,15 @@ launcher_with_preview() {
       --preview-window=left,35%,wrap --bind=right:accept \
       --expect=shift-left,shift-right --tabstop=1 \
       --cycle --exact \
-      --ansi --preview="$2"
+      --ansi --preview="$2")
+
+    # After fzf exits, clear the ueberzugpp image from the screen
+    if [ "$IMAGE_RENDERER" = "ueberzugpp" ]; then
+        if [ -n "$UEBERZUG_SOCKET" ] && [ -S "$UEBERZUG_SOCKET" ]; then
+            ueberzugpp cmd -s "$UEBERZUG_SOCKET" -i preview -a remove >/dev/null 2>&1
+        fi
+    fi
+    echo "$selection"
     ;;
   esac
 
@@ -659,6 +757,11 @@ PREVIEW_SCRIPT_FOR_CHANNELS="
     
     description=\$(echo \"\$video\"| jq '.description' -r);
     
+    if [ \"\$IMAGE_RENDERER\" = \"ueberzugpp\" ]; then
+        # Reserve vertical space for the ueberzugpp image overlay
+        for i in \$(seq 1 15); do echo; done
+    fi
+    
     if [ -f \"$CLI_PREVIEW_IMAGES_CACHE_DIR/\${id}.jpg\" ];then fzf_preview \"$CLI_PREVIEW_IMAGES_CACHE_DIR/\${id}.jpg\" 2>/dev/null;
     else echo loading preview image...;
     fi
@@ -707,6 +810,11 @@ PREVIEW_SCRIPT_FOR_CHANNELS_EXPLORER="
     
     description=\$(echo \"\$video\"| jq '.description' -r);
     
+    if [ \"\$IMAGE_RENDERER\" = \"ueberzugpp\" ]; then
+        # Reserve vertical space for the ueberzugpp image overlay
+        for i in \$(seq 1 15); do echo; done
+    fi
+    
     if [ -f \"$CLI_PREVIEW_IMAGES_CACHE_DIR/\${id}.jpg\" ];then fzf_preview \"$CLI_PREVIEW_IMAGES_CACHE_DIR/\${id}.jpg\" 2>/dev/null;
     else echo loading preview image...;
     fi
@@ -738,6 +846,11 @@ PREVIEW_SCRIPT_FOR_PLAYLISTS_EXPLORER="
 
     id=\$(echo \$video | jq '.thumbnails[-1].url' -r | generate_sha256);   
 
+    
+    if [ \"\$IMAGE_RENDERER\" = \"ueberzugpp\" ]; then
+        # Reserve vertical space for the ueberzugpp image overlay
+        for i in \$(seq 1 15); do echo; done
+    fi
     
     if [ -f \"$CLI_PREVIEW_IMAGES_CACHE_DIR/\${id}.jpg\" ];then fzf_preview \"$CLI_PREVIEW_IMAGES_CACHE_DIR/\${id}.jpg\" 2>/dev/null;
     else echo loading preview image...;
